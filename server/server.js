@@ -1,0 +1,378 @@
+require('dotenv').config?.();
+const express = require('express');
+const crypto = require('crypto');
+const { execSync } = require('child_process');
+const { Pool } = require('pg');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const cookieParser = require('cookie-parser');
+const rateLimit = require('express-rate-limit');
+
+const app = express();
+const PORT = process.env.PORT || 3002;
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+// ── Webhook (must be before express.json to get raw body) ────────────────────
+app.post('/webhook/deploy', express.raw({ type: 'application/json' }), (req, res) => {
+  if (!WEBHOOK_SECRET) return res.status(500).json({ error: 'Webhook not configured' });
+
+  const sig = req.headers['x-hub-signature-256'];
+  if (!sig) return res.status(401).json({ error: 'No signature' });
+
+  const hmac = 'sha256=' + crypto.createHmac('sha256', WEBHOOK_SECRET).update(req.body).digest('hex');
+  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(hmac)))
+    return res.status(401).json({ error: 'Invalid signature' });
+
+  res.json({ ok: true });
+
+  try {
+    execSync('git pull origin master && npm install', { cwd: __dirname, stdio: 'inherit' });
+    execSync('pm2 restart lunasol', { stdio: 'inherit' });
+  } catch (err) {
+    console.error('Deploy failed:', err.message);
+  }
+});
+
+// ── Middleware ────────────────────────────────────────────────────────────────
+app.use(express.json());
+app.use(cookieParser());
+app.use(express.static('public'));
+
+const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30, message: { error: 'Too many attempts. Try again later.' } });
+
+// ── Database init ────────────────────────────────────────────────────────────
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id         SERIAL PRIMARY KEY,
+      username   VARCHAR(30) UNIQUE NOT NULL,
+      email      VARCHAR(255) UNIQUE NOT NULL,
+      password   TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_profiles (
+      user_id        INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      age            INTEGER,
+      sex            VARCHAR(10) DEFAULT 'male',
+      height_cm      NUMERIC(5,1),
+      weight_kg      NUMERIC(5,1),
+      activity_level NUMERIC(4,3) DEFAULT 1.55,
+      goal           INTEGER DEFAULT -500,
+      updated_at     TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS fasts (
+      id           SERIAL PRIMARY KEY,
+      user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      preset       VARCHAR(20),
+      target_hours NUMERIC(5,1) NOT NULL,
+      started_at   TIMESTAMPTZ NOT NULL,
+      ended_at     TIMESTAMPTZ,
+      created_at   TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS daily_logs (
+      id         SERIAL PRIMARY KEY,
+      user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      log_date   DATE NOT NULL DEFAULT CURRENT_DATE,
+      success    BOOLEAN,
+      notes      TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE(user_id, log_date)
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS meal_entries (
+      id           SERIAL PRIMARY KEY,
+      user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      log_date     DATE NOT NULL DEFAULT CURRENT_DATE,
+      label        VARCHAR(120) NOT NULL,
+      calories     INTEGER NOT NULL,
+      created_at   TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  console.log('Database ready');
+}
+
+initDB().catch(err => {
+  console.error('Database connection failed:', err.message);
+  process.exit(1);
+});
+
+// ── Auth helpers ─────────────────────────────────────────────────────────────
+function createToken(userId) {
+  return jwt.sign({ id: userId }, JWT_SECRET, { expiresIn: '7d' });
+}
+
+async function requireAuth(req, res, next) {
+  // Support both cookie (web) and Authorization header (mobile)
+  const token = req.cookies.token
+    || (req.headers.authorization?.startsWith('Bearer ') && req.headers.authorization.slice(7));
+  if (!token) return res.status(401).json({ error: 'Not authenticated' });
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const result = await pool.query('SELECT id, username, email FROM users WHERE id = $1', [decoded.id]);
+    if (!result.rows[0]) return res.status(401).json({ error: 'User not found' });
+    req.user = result.rows[0];
+    next();
+  } catch {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+}
+
+// ── Auth routes ──────────────────────────────────────────────────────────────
+app.post('/api/signup', authLimiter, async (req, res) => {
+  const { username, email, password } = req.body;
+  if (!username || !email || !password)
+    return res.status(400).json({ error: 'All fields are required.' });
+  if (username.length < 3 || username.length > 30)
+    return res.status(400).json({ error: 'Username must be 3–30 characters.' });
+  if (password.length < 6)
+    return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+  if (!/[A-Z]/.test(password))
+    return res.status(400).json({ error: 'Password must contain an uppercase letter.' });
+  if (!/[^a-zA-Z0-9]/.test(password))
+    return res.status(400).json({ error: 'Password must contain a special character.' });
+
+  try {
+    const hash = await bcrypt.hash(password, 12);
+    const result = await pool.query(
+      'INSERT INTO users (username, email, password) VALUES ($1, $2, $3) RETURNING id',
+      [username.trim(), email.trim().toLowerCase(), hash]
+    );
+    // Create empty profile
+    await pool.query('INSERT INTO user_profiles (user_id) VALUES ($1)', [result.rows[0].id]);
+    const token = createToken(result.rows[0].id);
+    res.json({ success: true, token });
+  } catch (err) {
+    if (err.code === '23505') {
+      const field = err.constraint?.includes('email') ? 'Email' : 'Username';
+      return res.status(409).json({ error: `${field} already taken.` });
+    }
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/signin', authLimiter, async (req, res) => {
+  const { login, password } = req.body;
+  if (!login || !password)
+    return res.status(400).json({ error: 'All fields are required.' });
+
+  try {
+    const result = await pool.query(
+      'SELECT id, password FROM users WHERE email = $1 OR username = $1',
+      [login.trim().toLowerCase()]
+    );
+    const user = result.rows[0];
+    if (!user || !(await bcrypt.compare(password, user.password)))
+      return res.status(401).json({ error: 'Invalid credentials.' });
+
+    const token = createToken(user.id);
+    res.json({ success: true, token });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/signout', (req, res) => {
+  res.clearCookie('token');
+  res.json({ success: true });
+});
+
+app.get('/api/me', requireAuth, async (req, res) => {
+  const profile = await pool.query('SELECT * FROM user_profiles WHERE user_id = $1', [req.user.id]);
+  res.json({ user: req.user, profile: profile.rows[0] || null });
+});
+
+// ── Profile routes ───────────────────────────────────────────────────────────
+app.put('/api/profile', requireAuth, async (req, res) => {
+  const { age, sex, height_cm, weight_kg, activity_level, goal } = req.body;
+  try {
+    await pool.query(
+      `INSERT INTO user_profiles (user_id, age, sex, height_cm, weight_kg, activity_level, goal, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7, NOW())
+       ON CONFLICT (user_id) DO UPDATE SET
+         age = EXCLUDED.age, sex = EXCLUDED.sex, height_cm = EXCLUDED.height_cm,
+         weight_kg = EXCLUDED.weight_kg, activity_level = EXCLUDED.activity_level,
+         goal = EXCLUDED.goal, updated_at = NOW()`,
+      [req.user.id, age || null, sex || 'male', height_cm || null, weight_kg || null, activity_level || 1.55, goal ?? -500]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Fasting routes ───────────────────────────────────────────────────────────
+app.get('/api/fasts', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM fasts WHERE user_id = $1 ORDER BY started_at DESC LIMIT 50',
+      [req.user.id]
+    );
+    res.json({ fasts: result.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/fasts', requireAuth, async (req, res) => {
+  const { preset, target_hours, started_at } = req.body;
+  const hours = parseFloat(target_hours);
+  if (!hours || hours <= 0 || hours > 168)
+    return res.status(400).json({ error: 'Invalid fasting duration.' });
+
+  try {
+    // End any active fast first
+    await pool.query(
+      'UPDATE fasts SET ended_at = NOW() WHERE user_id = $1 AND ended_at IS NULL',
+      [req.user.id]
+    );
+    const result = await pool.query(
+      'INSERT INTO fasts (user_id, preset, target_hours, started_at) VALUES ($1,$2,$3,$4) RETURNING *',
+      [req.user.id, preset || null, hours, started_at || new Date().toISOString()]
+    );
+    res.json({ fast: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.patch('/api/fasts/:id/end', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'UPDATE fasts SET ended_at = NOW() WHERE id = $1 AND user_id = $2 AND ended_at IS NULL RETURNING *',
+      [req.params.id, req.user.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'No active fast found.' });
+    res.json({ fast: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.delete('/api/fasts/:id', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'DELETE FROM fasts WHERE id = $1 AND user_id = $2 RETURNING id',
+      [req.params.id, req.user.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Fast not found.' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Meal / daily log routes ──────────────────────────────────────────────────
+app.get('/api/meals', requireAuth, async (req, res) => {
+  const { date } = req.query;
+  const d = date || new Date().toISOString().split('T')[0];
+  try {
+    const meals = await pool.query(
+      'SELECT * FROM meal_entries WHERE user_id = $1 AND log_date = $2 ORDER BY created_at ASC',
+      [req.user.id, d]
+    );
+    const log = await pool.query(
+      'SELECT * FROM daily_logs WHERE user_id = $1 AND log_date = $2',
+      [req.user.id, d]
+    );
+    res.json({ meals: meals.rows, log: log.rows[0] || null });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/meals', requireAuth, async (req, res) => {
+  const { label, calories, date } = req.body;
+  if (!label?.trim()) return res.status(400).json({ error: 'Meal name is required.' });
+  const cal = parseInt(calories, 10);
+  if (!cal || cal <= 0) return res.status(400).json({ error: 'Enter a valid calorie amount.' });
+
+  try {
+    const d = date || new Date().toISOString().split('T')[0];
+    const result = await pool.query(
+      'INSERT INTO meal_entries (user_id, log_date, label, calories) VALUES ($1,$2,$3,$4) RETURNING *',
+      [req.user.id, d, label.trim(), cal]
+    );
+    res.json({ meal: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.delete('/api/meals/:id', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'DELETE FROM meal_entries WHERE id = $1 AND user_id = $2 RETURNING id',
+      [req.params.id, req.user.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Entry not found.' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.put('/api/daily-log', requireAuth, async (req, res) => {
+  const { date, success, notes } = req.body;
+  const d = date || new Date().toISOString().split('T')[0];
+  try {
+    await pool.query(
+      `INSERT INTO daily_logs (user_id, log_date, success, notes)
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT (user_id, log_date) DO UPDATE SET
+         success = EXCLUDED.success, notes = EXCLUDED.notes`,
+      [req.user.id, d, success ?? null, notes || null]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/daily-logs', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT dl.log_date, dl.success, dl.notes,
+              COALESCE(SUM(me.calories), 0) AS total_calories,
+              COUNT(me.id) AS meal_count
+       FROM daily_logs dl
+       LEFT JOIN meal_entries me ON me.user_id = dl.user_id AND me.log_date = dl.log_date
+       WHERE dl.user_id = $1
+       GROUP BY dl.log_date, dl.success, dl.notes
+       ORDER BY dl.log_date DESC
+       LIMIT 60`,
+      [req.user.id]
+    );
+    res.json({ logs: result.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Smart redirect ───────────────────────────────────────────────────────────
+app.get('/dashboard', (req, res) => res.sendFile(__dirname + '/public/dashboard.html'));
+
+app.listen(PORT, () => {
+  console.log(`LunaSol running at http://localhost:${PORT}`);
+});
