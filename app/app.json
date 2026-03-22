@@ -25,6 +25,7 @@
       ["expo-router", { "root": "./src/app" }],
       "expo-secure-store",
       "expo-image-picker",
+      "expo-notifications",
       ["react-native-android-widget", {
         "widgets": [
           {

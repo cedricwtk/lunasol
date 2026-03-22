@@ -10,6 +10,8 @@ const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
 const multer = require('multer');
+const nodemailer = require('nodemailer');
+const cron = require('node-cron');
 
 const app = express();
 const PORT = process.env.PORT || 3002;
@@ -37,6 +39,38 @@ const uploadAvatar = multer({
     else cb(new Error('Only image files are allowed'));
   },
 });
+
+// ── Email transporter ───────────────────────────────────────────────────────
+const emailTransporter = process.env.SMTP_HOST ? nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: parseInt(process.env.SMTP_PORT || '587'),
+  secure: process.env.SMTP_SECURE === 'true',
+  auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+}) : null;
+
+async function sendEmail(to, subject, text) {
+  if (!emailTransporter) { console.log('Email skipped (no SMTP configured):', subject); return; }
+  try {
+    await emailTransporter.sendMail({
+      from: process.env.SMTP_FROM || 'LunaSol <noreply@lunasol.app>',
+      to, subject, text,
+    });
+    console.log('Email sent:', subject, to);
+  } catch (err) { console.error('Email failed:', err.message); }
+}
+
+// ── Expo push notifications ─────────────────────────────────────────────────
+async function sendPushNotification(pushToken, title, body) {
+  if (!pushToken) return;
+  try {
+    await fetch('https://exp.host/--/api/v2/push/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: pushToken, title, body, sound: 'default' }),
+    });
+    console.log('Push sent:', title);
+  } catch (err) { console.error('Push failed:', err.message); }
+}
 
 // ── Webhook (must be before express.json to get raw body) ────────────────────
 app.post('/webhook/deploy', express.raw({ type: 'application/json' }), (req, res) => {
@@ -142,8 +176,23 @@ async function initDB() {
       created_at    TIMESTAMPTZ DEFAULT NOW()
     )
   `);
-  // Add avatar column if missing
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS responsibilities (
+      id            SERIAL PRIMARY KEY,
+      user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      title         VARCHAR(200) NOT NULL,
+      note          TEXT,
+      due_date      TIMESTAMPTZ NOT NULL,
+      priority      VARCHAR(10) NOT NULL DEFAULT 'normal' CHECK (priority IN ('normal', 'high')),
+      completed     BOOLEAN DEFAULT FALSE,
+      reminded_24h  BOOLEAN DEFAULT FALSE,
+      reminded_1w   BOOLEAN DEFAULT FALSE,
+      created_at    TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  // Add avatar and push token columns if missing
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS push_token TEXT`);
   console.log('Database ready');
 }
 
@@ -548,6 +597,157 @@ app.get('/api/expenses/summary', requireAuth, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Push token ──────────────────────────────────────────────────────────────
+app.put('/api/push-token', requireAuth, async (req, res) => {
+  const { token } = req.body;
+  if (!token) return res.status(400).json({ error: 'Token required' });
+  try {
+    await pool.query('UPDATE users SET push_token = $1 WHERE id = $2', [token, req.user.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Responsibility routes ───────────────────────────────────────────────────
+app.get('/api/responsibilities', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM responsibilities WHERE user_id = $1 ORDER BY completed ASC, due_date ASC',
+      [req.user.id]
+    );
+    res.json({ items: result.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/responsibilities', requireAuth, async (req, res) => {
+  const { title, note, due_date, priority } = req.body;
+  if (!title?.trim()) return res.status(400).json({ error: 'Title is required.' });
+  if (!due_date) return res.status(400).json({ error: 'Due date is required.' });
+  if (priority && !['normal', 'high'].includes(priority))
+    return res.status(400).json({ error: 'Priority must be normal or high.' });
+  try {
+    const result = await pool.query(
+      'INSERT INTO responsibilities (user_id, title, note, due_date, priority) VALUES ($1,$2,$3,$4,$5) RETURNING *',
+      [req.user.id, title.trim(), note?.trim() || null, due_date, priority || 'normal']
+    );
+    res.json({ item: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.patch('/api/responsibilities/:id', requireAuth, async (req, res) => {
+  const { completed, title, note, due_date, priority } = req.body;
+  try {
+    const existing = await pool.query(
+      'SELECT * FROM responsibilities WHERE id = $1 AND user_id = $2', [req.params.id, req.user.id]
+    );
+    if (!existing.rows[0]) return res.status(404).json({ error: 'Not found.' });
+    const item = existing.rows[0];
+    const result = await pool.query(
+      `UPDATE responsibilities SET title = $1, note = $2, due_date = $3, priority = $4, completed = $5
+       WHERE id = $6 AND user_id = $7 RETURNING *`,
+      [
+        title ?? item.title, note !== undefined ? (note || null) : item.note,
+        due_date ?? item.due_date, priority ?? item.priority,
+        completed !== undefined ? completed : item.completed,
+        req.params.id, req.user.id
+      ]
+    );
+    res.json({ item: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.delete('/api/responsibilities/:id', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'DELETE FROM responsibilities WHERE id = $1 AND user_id = $2 RETURNING id',
+      [req.params.id, req.user.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Not found.' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Reminder cron (runs every 30 minutes) ───────────────────────────────────
+cron.schedule('*/30 * * * *', async () => {
+  console.log('Checking reminders...');
+  try {
+    const now = new Date();
+
+    // High priority: email 1 week before
+    const weekItems = await pool.query(
+      `SELECT r.*, u.email, u.push_token FROM responsibilities r
+       JOIN users u ON u.id = r.user_id
+       WHERE r.completed = FALSE AND r.reminded_1w = FALSE AND r.priority = 'high'
+         AND r.due_date <= NOW() + INTERVAL '7 days' AND r.due_date > NOW()`
+    );
+    for (const item of weekItems.rows) {
+      const dueStr = new Date(item.due_date).toLocaleDateString('en-US', {
+        weekday: 'long', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit',
+      });
+      await sendEmail(
+        item.email,
+        `[HIGH] Reminder: ${item.title}`,
+        `Hey! This is your 1-week reminder.\n\n"${item.title}"${item.note ? `\nNote: ${item.note}` : ''}\n\nDue: ${dueStr}\n\nDon't forget!\n— LunaSol`
+      );
+      await sendPushNotification(item.push_token, `[HIGH] ${item.title}`, `Due ${dueStr} — 1 week reminder`);
+      await pool.query('UPDATE responsibilities SET reminded_1w = TRUE WHERE id = $1', [item.id]);
+    }
+
+    // Normal + High: push notification 24h before
+    const dayItems = await pool.query(
+      `SELECT r.*, u.push_token FROM responsibilities r
+       JOIN users u ON u.id = r.user_id
+       WHERE r.completed = FALSE AND r.reminded_24h = FALSE
+         AND r.due_date <= NOW() + INTERVAL '24 hours' AND r.due_date > NOW()`
+    );
+    for (const item of dayItems.rows) {
+      const dueStr = new Date(item.due_date).toLocaleDateString('en-US', {
+        weekday: 'short', hour: '2-digit', minute: '2-digit',
+      });
+      const prefix = item.priority === 'high' ? '[HIGH] ' : '';
+      await sendPushNotification(item.push_token, `${prefix}Due tomorrow: ${item.title}`, `${dueStr}${item.note ? ` — ${item.note}` : ''}`);
+      await pool.query('UPDATE responsibilities SET reminded_24h = TRUE WHERE id = $1', [item.id]);
+    }
+
+    // Also email high priority at 24h mark
+    const dayHighItems = await pool.query(
+      `SELECT r.*, u.email FROM responsibilities r
+       JOIN users u ON u.id = r.user_id
+       WHERE r.completed = FALSE AND r.reminded_24h = TRUE AND r.priority = 'high'
+         AND r.due_date <= NOW() + INTERVAL '24 hours' AND r.due_date > NOW()
+         AND r.reminded_1w = TRUE`
+    );
+    for (const item of dayHighItems.rows) {
+      const dueStr = new Date(item.due_date).toLocaleDateString('en-US', {
+        weekday: 'long', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit',
+      });
+      await sendEmail(
+        item.email,
+        `[URGENT] Tomorrow: ${item.title}`,
+        `URGENT REMINDER!\n\n"${item.title}"${item.note ? `\nNote: ${item.note}` : ''}\n\nDue: ${dueStr}\n\nThis is due TOMORROW.\n— LunaSol`
+      );
+    }
+
+    console.log(`Reminders processed: ${weekItems.rows.length} weekly, ${dayItems.rows.length} daily`);
+  } catch (err) {
+    console.error('Reminder cron error:', err.message);
   }
 });
 

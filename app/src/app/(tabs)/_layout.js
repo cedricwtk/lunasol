@@ -35,6 +35,13 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
+        name="responsibilities"
+        options={{
+          title: 'Tasks',
+          tabBarIcon: ({ color, size }) => <Ionicons name="clipboard-outline" size={size} color={color} />,
+        }}
+      />
+      <Tabs.Screen
         name="fasting"
         options={{
           title: 'Fasting',

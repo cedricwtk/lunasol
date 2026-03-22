@@ -1,5 +1,11 @@
 import { createContext, useContext, useState, useEffect } from 'react';
+import { Platform } from 'react-native';
+import * as Notifications from 'expo-notifications';
 import { api, loadToken, saveToken, clearToken } from '../lib/api';
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({ shouldShowAlert: true, shouldPlaySound: true, shouldSetBadge: false }),
+});
 
 const AuthContext = createContext(null);
 
@@ -8,6 +14,27 @@ export function AuthProvider({ children }) {
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  async function registerPushToken() {
+    try {
+      const { status: existing } = await Notifications.getPermissionsAsync();
+      let finalStatus = existing;
+      if (existing !== 'granted') {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalStatus = status;
+      }
+      if (finalStatus !== 'granted') return;
+      if (Platform.OS === 'android') {
+        await Notifications.setNotificationChannelAsync('reminders', {
+          name: 'Reminders', importance: Notifications.AndroidImportance.HIGH,
+          sound: 'default', vibrationPattern: [0, 250, 250, 250],
+        });
+      }
+      const tokenData = await Notifications.getExpoPushTokenAsync({ projectId: undefined });
+      const pushToken = tokenData.data;
+      await api('/api/push-token', { method: 'PUT', body: JSON.stringify({ token: pushToken }) });
+    } catch (err) { console.log('Push token registration skipped:', err.message); }
+  }
+
   useEffect(() => {
     (async () => {
       try {
@@ -15,6 +42,7 @@ export function AuthProvider({ children }) {
         const data = await api('/api/me');
         setUser(data.user);
         setProfile(data.profile);
+        registerPushToken();
       } catch {
         await clearToken();
       } finally {
