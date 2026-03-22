@@ -1,7 +1,8 @@
 import * as SecureStore from 'expo-secure-store';
 
 // Change this to your server URL in production
-const BASE_URL = __DEV__ ? 'http://10.0.2.2:3002' : 'https://your-domain.com';
+export const BASE_URL = 'http://5.161.90.215:3002';
+
 
 let authToken = null;
 
@@ -20,7 +21,11 @@ export async function clearToken() {
 }
 
 export async function api(path, options = {}) {
-  const headers = { 'Content-Type': 'application/json', ...options.headers };
+  const headers = { ...options.headers };
+  // Don't set Content-Type for FormData (let browser set boundary)
+  if (!(options.body instanceof FormData)) {
+    headers['Content-Type'] = headers['Content-Type'] || 'application/json';
+  }
   if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
 
   const res = await fetch(`${BASE_URL}${path}`, {

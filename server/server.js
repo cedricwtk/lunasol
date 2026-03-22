@@ -1,12 +1,15 @@
 require('dotenv').config?.();
 const express = require('express');
 const crypto = require('crypto');
+const path = require('path');
+const fs = require('fs');
 const { execSync } = require('child_process');
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
+const multer = require('multer');
 
 const app = express();
 const PORT = process.env.PORT || 3002;
@@ -14,6 +17,26 @@ const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-me';
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+// ── Avatar uploads ──────────────────────────────────────────────────────────
+const uploadsDir = path.join(__dirname, 'uploads', 'avatars');
+fs.mkdirSync(uploadsDir, { recursive: true });
+
+const avatarStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadsDir),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname) || '.jpg';
+    cb(null, `user-${req.user.id}${ext}`);
+  },
+});
+const uploadAvatar = multer({
+  storage: avatarStorage,
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) cb(null, true);
+    else cb(new Error('Only image files are allowed'));
+  },
+});
 
 // ── Webhook (must be before express.json to get raw body) ────────────────────
 app.post('/webhook/deploy', express.raw({ type: 'application/json' }), (req, res) => {
@@ -40,6 +63,7 @@ app.post('/webhook/deploy', express.raw({ type: 'application/json' }), (req, res
 app.use(express.json());
 app.use(cookieParser());
 app.use(express.static('public'));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30, message: { error: 'Too many attempts. Try again later.' } });
 
@@ -98,6 +122,8 @@ async function initDB() {
       created_at   TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  // Add avatar column if missing
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT`);
   console.log('Database ready');
 }
 
@@ -189,8 +215,22 @@ app.post('/api/signout', (req, res) => {
 });
 
 app.get('/api/me', requireAuth, async (req, res) => {
+  const userFull = await pool.query('SELECT id, username, email, avatar_url FROM users WHERE id = $1', [req.user.id]);
   const profile = await pool.query('SELECT * FROM user_profiles WHERE user_id = $1', [req.user.id]);
-  res.json({ user: req.user, profile: profile.rows[0] || null });
+  res.json({ user: userFull.rows[0], profile: profile.rows[0] || null });
+});
+
+// ── Avatar upload ─────────────────────────────────────────────────────────
+app.post('/api/avatar', requireAuth, uploadAvatar.single('avatar'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No image provided' });
+  const avatarUrl = `/uploads/avatars/${req.file.filename}`;
+  try {
+    await pool.query('UPDATE users SET avatar_url = $1 WHERE id = $2', [avatarUrl, req.user.id]);
+    res.json({ success: true, avatar_url: avatarUrl });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
 // ── Profile routes ───────────────────────────────────────────────────────────

@@ -6,27 +6,32 @@ export default function TabLayout() {
   return (
     <Tabs
       screenOptions={{
-        headerStyle: { backgroundColor: colors.bg, borderBottomWidth: 1, borderBottomColor: colors.border },
+        headerStyle: { backgroundColor: colors.bg, elevation: 0, shadowOpacity: 0, borderBottomWidth: 1, borderBottomColor: colors.border },
         headerTintColor: colors.text,
         headerTitleStyle: { fontWeight: '700', fontSize: 17 },
         tabBarStyle: {
-          backgroundColor: colors.bg,
+          backgroundColor: colors.tabBar,
           borderTopColor: colors.border,
           borderTopWidth: 1,
           height: 60,
           paddingBottom: 8,
           paddingTop: 4,
+          elevation: 8,
+          shadowColor: '#000',
+          shadowOffset: { width: 0, height: -2 },
+          shadowOpacity: 0.04,
+          shadowRadius: 8,
         },
         tabBarActiveTintColor: colors.accent,
-        tabBarInactiveTintColor: colors.textDim,
+        tabBarInactiveTintColor: colors.muted,
         tabBarLabelStyle: { fontSize: 11, fontWeight: '600' },
       }}
     >
       <Tabs.Screen
-        name="calculator"
+        name="log"
         options={{
-          title: 'Calculator',
-          tabBarIcon: ({ color, size }) => <Ionicons name="calculator-outline" size={size} color={color} />,
+          title: 'Home',
+          tabBarIcon: ({ color, size }) => <Ionicons name="home-outline" size={size} color={color} />,
         }}
       />
       <Tabs.Screen
@@ -37,10 +42,10 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
-        name="log"
+        name="stats"
         options={{
-          title: 'Daily Log',
-          tabBarIcon: ({ color, size }) => <Ionicons name="nutrition-outline" size={size} color={color} />,
+          title: 'Stats',
+          tabBarIcon: ({ color, size }) => <Ionicons name="bar-chart-outline" size={size} color={color} />,
         }}
       />
       <Tabs.Screen
@@ -50,6 +55,7 @@ export default function TabLayout() {
           tabBarIcon: ({ color, size }) => <Ionicons name="person-outline" size={size} color={color} />,
         }}
       />
+      <Tabs.Screen name="calculator" options={{ href: null }} />
     </Tabs>
   );
 }

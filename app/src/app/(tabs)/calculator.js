@@ -127,16 +127,16 @@ export default function Calculator() {
         <View style={styles.row}>
           <View style={styles.fieldHalf}>
             <Text style={styles.label}>AGE</Text>
-            <TextInput style={styles.input} value={age} onChangeText={setAge} keyboardType="numeric" placeholder="28" placeholderTextColor="#3b4a5e" />
+            <TextInput style={styles.input} value={age} onChangeText={setAge} keyboardType="numeric" placeholder="28" placeholderTextColor={colors.muted} />
           </View>
           <View style={styles.fieldHalf}>
             <Text style={styles.label}>HEIGHT (CM)</Text>
-            <TextInput style={styles.input} value={height} onChangeText={setHeight} keyboardType="decimal-pad" placeholder="178" placeholderTextColor="#3b4a5e" />
+            <TextInput style={styles.input} value={height} onChangeText={setHeight} keyboardType="decimal-pad" placeholder="178" placeholderTextColor={colors.muted} />
           </View>
         </View>
 
         <Text style={styles.label}>WEIGHT (KG)</Text>
-        <TextInput style={styles.input} value={weight} onChangeText={setWeight} keyboardType="decimal-pad" placeholder="75" placeholderTextColor="#3b4a5e" />
+        <TextInput style={styles.input} value={weight} onChangeText={setWeight} keyboardType="decimal-pad" placeholder="75" placeholderTextColor={colors.muted} />
 
         {/* Activity */}
         <Text style={styles.label}>ACTIVITY LEVEL</Text>
@@ -284,7 +284,7 @@ const styles = StyleSheet.create({
     flex: 1, backgroundColor: colors.input, borderWidth: 1, borderColor: colors.border,
     borderRadius: 8, padding: 14,
   },
-  resultCardHighlight: { borderColor: 'rgba(167,139,250,0.4)' },
+  resultCardHighlight: { borderColor: 'rgba(232,133,91,0.4)' },
   resultLabel: { fontSize: 10, fontWeight: '600', color: colors.textDim, letterSpacing: 0.8, marginBottom: 6 },
   resultValue: { fontSize: 22, fontWeight: '800', color: colors.text },
   resultUnit: { fontSize: 11, color: colors.textDim, marginTop: 2 },
