@@ -1,34 +1,63 @@
-import { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, ScrollView } from 'react-native';
+import { useState, useCallback } from 'react';
+import { View, Text, StyleSheet, ScrollView, RefreshControl, TouchableOpacity } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useFocusEffect } from 'expo-router';
 import { api } from '../../lib/api';
 import { colors } from '../../lib/theme';
+
+const CAT_COLORS = ['#e8855b', '#5cb886', '#4f8aff', '#d4784e', '#a78bfa', '#f59e0b', '#ec4899', '#06b6d4'];
 
 export default function Stats() {
   const [logs, setLogs] = useState([]);
   const [fasts, setFasts] = useState([]);
+  const [expenseSummary, setExpenseSummary] = useState({ breakdown: [], totals: [] });
+  const [expenseMonth, setExpenseMonth] = useState(currentMonth());
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const [logData, fastData] = await Promise.all([
-          api('/api/daily-logs'),
-          api('/api/fasts'),
-        ]);
-        setLogs(logData.logs || []);
-        setFasts(fastData.fasts || []);
-      } catch {}
-      setLoading(false);
-    })();
-  }, []);
+  function currentMonth() { return new Date().toISOString().slice(0, 7); }
+
+  const fetchData = useCallback(async (m) => {
+    try {
+      const [logData, fastData, expData] = await Promise.all([
+        api('/api/daily-logs'),
+        api('/api/fasts'),
+        api(`/api/expenses/summary?month=${m || expenseMonth}`),
+      ]);
+      setLogs(logData.logs || []);
+      setFasts(fastData.fasts || []);
+      setExpenseSummary(expData);
+    } catch {}
+  }, [expenseMonth]);
+
+  useFocusEffect(useCallback(() => {
+    fetchData().then(() => setLoading(false));
+  }, [fetchData]));
+
+  async function onRefresh() {
+    setRefreshing(true);
+    await fetchData();
+    setRefreshing(false);
+  }
+
+  function shiftExpenseMonth(dir) {
+    const [y, m] = expenseMonth.split('-').map(Number);
+    const d = new Date(y, m - 1 + dir, 1);
+    const newMonth = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    setExpenseMonth(newMonth);
+    fetchData(newMonth);
+  }
+
+  function fmtMonth(m) {
+    const [y, mo] = m.split('-');
+    return new Date(y, mo - 1).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+  }
 
   // Calorie stats
   const daysLogged = logs.length;
   const totalCalories = logs.reduce((s, l) => s + parseInt(l.total_calories || 0), 0);
   const avgCalories = daysLogged > 0 ? Math.round(totalCalories / daysLogged) : 0;
   const successDays = logs.filter(l => l.success === true).length;
-  const failDays = logs.filter(l => l.success === false).length;
   const successRate = daysLogged > 0 ? Math.round((successDays / daysLogged) * 100) : 0;
 
   // Streak
@@ -55,6 +84,15 @@ export default function Stats() {
   // Last 7 days mini chart
   const last7 = logs.slice(0, 7).reverse();
 
+  // Expense stats
+  const necTotal = parseFloat(expenseSummary.totals?.find(t => t.category_type === 'necessary')?.total || 0);
+  const unnecTotal = parseFloat(expenseSummary.totals?.find(t => t.category_type === 'unnecessary')?.total || 0);
+  const expGrandTotal = necTotal + unnecTotal;
+  const breakdown = expenseSummary.breakdown || [];
+
+  // Build bar data for expense categories
+  const maxSubTotal = Math.max(...breakdown.map(b => parseFloat(b.total)), 1);
+
   if (loading) {
     return (
       <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
@@ -64,7 +102,8 @@ export default function Stats() {
   }
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 40 }}>
+    <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 40 }}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.accent} colors={[colors.accent]} />}>
       <Text style={styles.heading}>Your Stats</Text>
 
       {/* Streak */}
@@ -121,6 +160,74 @@ export default function Stats() {
         <StatCard icon="speedometer-outline" label="Avg Duration" value={avgFastHours} unit="hrs" />
         <StatCard icon="ribbon-outline" label="Success Rate" value={`${fastSuccessRate}%`} accent={fastSuccessRate >= 70} />
       </View>
+
+      {/* Expenses */}
+      <Text style={styles.sectionLabel}>EXPENSES</Text>
+
+      {/* Month nav for expenses */}
+      <View style={styles.expMonthNav}>
+        <TouchableOpacity onPress={() => shiftExpenseMonth(-1)}>
+          <Ionicons name="chevron-back" size={18} color={colors.text} />
+        </TouchableOpacity>
+        <Text style={styles.expMonthText}>{fmtMonth(expenseMonth)}</Text>
+        <TouchableOpacity onPress={() => shiftExpenseMonth(1)} disabled={expenseMonth >= currentMonth()}>
+          <Ionicons name="chevron-forward" size={18} color={expenseMonth >= currentMonth() ? colors.border : colors.text} />
+        </TouchableOpacity>
+      </View>
+
+      {/* Expense totals */}
+      <View style={styles.expTotalsCard}>
+        <View style={styles.expTotalRow}>
+          <Text style={styles.expTotalLabel}>Total Spent</Text>
+          <Text style={styles.expTotalValue}>${expGrandTotal.toFixed(2)}</Text>
+        </View>
+        {/* Necessary vs Unnecessary bar */}
+        {expGrandTotal > 0 && (
+          <View style={styles.splitBar}>
+            <View style={[styles.splitSeg, { flex: necTotal || 0.01, backgroundColor: colors.success, borderTopLeftRadius: 6, borderBottomLeftRadius: 6 }]} />
+            <View style={[styles.splitSeg, { flex: unnecTotal || 0.01, backgroundColor: colors.danger, borderTopRightRadius: 6, borderBottomRightRadius: 6 }]} />
+          </View>
+        )}
+        <View style={styles.expTotalSplit}>
+          <View style={styles.expSplitItem}>
+            <View style={[styles.expDot, { backgroundColor: colors.success }]} />
+            <Text style={styles.expSplitLabel}>Necessary</Text>
+            <Text style={styles.expSplitValue}>${necTotal.toFixed(2)}</Text>
+          </View>
+          <View style={styles.expSplitItem}>
+            <View style={[styles.expDot, { backgroundColor: colors.danger }]} />
+            <Text style={styles.expSplitLabel}>Unnecessary</Text>
+            <Text style={styles.expSplitValue}>${unnecTotal.toFixed(2)}</Text>
+          </View>
+        </View>
+      </View>
+
+      {/* Category breakdown horizontal bars */}
+      {breakdown.length > 0 && (
+        <View style={styles.breakdownCard}>
+          <Text style={styles.miniChartTitle}>By Category</Text>
+          {breakdown.map((b, i) => {
+            const pct = Math.max((parseFloat(b.total) / maxSubTotal) * 100, 4);
+            const barColor = b.category_type === 'necessary' ? colors.success : CAT_COLORS[i % CAT_COLORS.length];
+            return (
+              <View key={i} style={styles.hBarRow}>
+                <View style={styles.hBarLabelWrap}>
+                  <Text style={styles.hBarLabel} numberOfLines={1}>{b.subcategory}</Text>
+                  <Text style={styles.hBarType}>{b.category_type === 'necessary' ? 'NEC' : 'UNN'}</Text>
+                </View>
+                <View style={styles.hBarTrack}>
+                  <View style={[styles.hBarFill, { width: `${pct}%`, backgroundColor: barColor }]} />
+                </View>
+                <Text style={styles.hBarValue}>${parseFloat(b.total).toFixed(0)}</Text>
+              </View>
+            );
+          })}
+        </View>
+      )}
+
+      {expGrandTotal === 0 && (
+        <Text style={styles.emptyExp}>No expenses logged for {fmtMonth(expenseMonth)}.</Text>
+      )}
     </ScrollView>
   );
 }
@@ -175,4 +282,41 @@ const styles = StyleSheet.create({
   barTrack: { width: '100%', height: 60, backgroundColor: colors.input, borderRadius: 4, overflow: 'hidden', justifyContent: 'flex-end' },
   barFill: { width: '100%', borderRadius: 4 },
   barLabel: { fontSize: 10, color: colors.textDim, fontWeight: '600' },
+
+  // Expense styles
+  expMonthNav: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 16, marginBottom: 12,
+  },
+  expMonthText: { fontSize: 14, fontWeight: '600', color: colors.text, minWidth: 100, textAlign: 'center' },
+
+  expTotalsCard: {
+    backgroundColor: colors.card, borderRadius: 14, padding: 16,
+    shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 6, elevation: 2,
+  },
+  expTotalRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  expTotalLabel: { fontSize: 13, fontWeight: '600', color: colors.textDim },
+  expTotalValue: { fontSize: 24, fontWeight: '800', color: colors.text },
+
+  splitBar: { flexDirection: 'row', height: 10, borderRadius: 6, overflow: 'hidden', marginBottom: 12 },
+  splitSeg: { height: '100%' },
+
+  expTotalSplit: { flexDirection: 'row', justifyContent: 'space-between' },
+  expSplitItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  expDot: { width: 8, height: 8, borderRadius: 4 },
+  expSplitLabel: { fontSize: 12, color: colors.textDim, fontWeight: '500' },
+  expSplitValue: { fontSize: 13, fontWeight: '700', color: colors.text },
+
+  breakdownCard: {
+    backgroundColor: colors.card, borderRadius: 14, padding: 16, marginTop: 10,
+    shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 6, elevation: 2,
+  },
+  hBarRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 10, gap: 8 },
+  hBarLabelWrap: { width: 90 },
+  hBarLabel: { fontSize: 12, fontWeight: '600', color: colors.text },
+  hBarType: { fontSize: 9, fontWeight: '600', color: colors.textDim, letterSpacing: 0.5 },
+  hBarTrack: { flex: 1, height: 16, backgroundColor: colors.input, borderRadius: 4, overflow: 'hidden' },
+  hBarFill: { height: '100%', borderRadius: 4 },
+  hBarValue: { fontSize: 12, fontWeight: '700', color: colors.text, width: 50, textAlign: 'right' },
+
+  emptyExp: { color: colors.textDim, fontSize: 12, textAlign: 'center', marginTop: 12 },
 });

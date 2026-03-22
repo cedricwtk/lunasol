@@ -122,6 +122,26 @@ async function initDB() {
       created_at   TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS expense_categories (
+      id       SERIAL PRIMARY KEY,
+      user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name     VARCHAR(60) NOT NULL,
+      UNIQUE(user_id, name)
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS expenses (
+      id            SERIAL PRIMARY KEY,
+      user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      amount        NUMERIC(10,2) NOT NULL,
+      category_type VARCHAR(12) NOT NULL CHECK (category_type IN ('necessary', 'unnecessary')),
+      subcategory   VARCHAR(60) NOT NULL,
+      note          TEXT,
+      expense_date  DATE NOT NULL DEFAULT CURRENT_DATE,
+      created_at    TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
   // Add avatar column if missing
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT`);
   console.log('Database ready');
@@ -404,6 +424,127 @@ app.get('/api/daily-logs', requireAuth, async (req, res) => {
       [req.user.id]
     );
     res.json({ logs: result.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Expense category routes ─────────────────────────────────────────────────
+app.get('/api/expense-categories', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM expense_categories WHERE user_id = $1 ORDER BY name ASC',
+      [req.user.id]
+    );
+    res.json({ categories: result.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/expense-categories', requireAuth, async (req, res) => {
+  const { name } = req.body;
+  if (!name?.trim()) return res.status(400).json({ error: 'Category name is required.' });
+  try {
+    const result = await pool.query(
+      'INSERT INTO expense_categories (user_id, name) VALUES ($1, $2) RETURNING *',
+      [req.user.id, name.trim()]
+    );
+    res.json({ category: result.rows[0] });
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'Category already exists.' });
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.delete('/api/expense-categories/:id', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'DELETE FROM expense_categories WHERE id = $1 AND user_id = $2 RETURNING id',
+      [req.params.id, req.user.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Category not found.' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Expense routes ──────────────────────────────────────────────────────────
+app.get('/api/expenses', requireAuth, async (req, res) => {
+  const { month } = req.query; // format: YYYY-MM
+  try {
+    let query, params;
+    if (month) {
+      query = `SELECT * FROM expenses WHERE user_id = $1 AND to_char(expense_date, 'YYYY-MM') = $2 ORDER BY expense_date DESC, created_at DESC`;
+      params = [req.user.id, month];
+    } else {
+      query = 'SELECT * FROM expenses WHERE user_id = $1 ORDER BY expense_date DESC, created_at DESC LIMIT 100';
+      params = [req.user.id];
+    }
+    const result = await pool.query(query, params);
+    res.json({ expenses: result.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/expenses', requireAuth, async (req, res) => {
+  const { amount, category_type, subcategory, note, date } = req.body;
+  const amt = parseFloat(amount);
+  if (!amt || amt <= 0) return res.status(400).json({ error: 'Enter a valid amount.' });
+  if (!['necessary', 'unnecessary'].includes(category_type))
+    return res.status(400).json({ error: 'Invalid category type.' });
+  if (!subcategory?.trim()) return res.status(400).json({ error: 'Subcategory is required.' });
+  try {
+    const d = date || new Date().toISOString().split('T')[0];
+    const result = await pool.query(
+      'INSERT INTO expenses (user_id, amount, category_type, subcategory, note, expense_date) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
+      [req.user.id, amt, category_type, subcategory.trim(), note?.trim() || null, d]
+    );
+    res.json({ expense: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.delete('/api/expenses/:id', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'DELETE FROM expenses WHERE id = $1 AND user_id = $2 RETURNING id',
+      [req.params.id, req.user.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Expense not found.' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/expenses/summary', requireAuth, async (req, res) => {
+  const { month } = req.query;
+  const m = month || new Date().toISOString().slice(0, 7);
+  try {
+    const result = await pool.query(
+      `SELECT category_type, subcategory, SUM(amount)::numeric AS total, COUNT(*)::int AS count
+       FROM expenses WHERE user_id = $1 AND to_char(expense_date, 'YYYY-MM') = $2
+       GROUP BY category_type, subcategory ORDER BY total DESC`,
+      [req.user.id, m]
+    );
+    const totals = await pool.query(
+      `SELECT category_type, SUM(amount)::numeric AS total
+       FROM expenses WHERE user_id = $1 AND to_char(expense_date, 'YYYY-MM') = $2
+       GROUP BY category_type`,
+      [req.user.id, m]
+    );
+    res.json({ breakdown: result.rows, totals: totals.rows });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });

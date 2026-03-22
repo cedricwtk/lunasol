@@ -24,7 +24,7 @@ export default function TabLayout() {
         },
         tabBarActiveTintColor: colors.accent,
         tabBarInactiveTintColor: colors.muted,
-        tabBarLabelStyle: { fontSize: 11, fontWeight: '600' },
+        tabBarLabelStyle: { fontSize: 10, fontWeight: '600' },
       }}
     >
       <Tabs.Screen
@@ -39,6 +39,13 @@ export default function TabLayout() {
         options={{
           title: 'Fasting',
           tabBarIcon: ({ color, size }) => <Ionicons name="timer-outline" size={size} color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="expenses"
+        options={{
+          title: 'Expenses',
+          tabBarIcon: ({ color, size }) => <Ionicons name="wallet-outline" size={size} color={color} />,
         }}
       />
       <Tabs.Screen
