@@ -751,6 +751,22 @@ cron.schedule('*/30 * * * *', async () => {
   }
 });
 
+// ── Test email endpoint (remove after testing) ─────────────────────────────
+app.get('/api/test-email', requireAuth, async (req, res) => {
+  if (!emailTransporter) return res.json({ error: 'No SMTP configured. Check env vars: SMTP_HOST, SMTP_USER, SMTP_PASS' });
+  try {
+    await emailTransporter.sendMail({
+      from: process.env.SMTP_FROM || 'LunaSol <noreply@lunasol.app>',
+      to: req.user.email,
+      subject: 'LunaSol Test Email',
+      text: 'If you received this, your email configuration is working correctly!\n\n— LunaSol',
+    });
+    res.json({ success: true, sent_to: req.user.email });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
 // ── Smart redirect ───────────────────────────────────────────────────────────
 app.get('/dashboard', (req, res) => res.sendFile(__dirname + '/public/dashboard.html'));
 
