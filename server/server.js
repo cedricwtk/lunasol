@@ -190,6 +190,32 @@ async function initDB() {
       created_at    TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS cleanse_challenges (
+      id           SERIAL PRIMARY KEY,
+      user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      total_days   INTEGER NOT NULL DEFAULT 14,
+      days_left    INTEGER NOT NULL DEFAULT 14,
+      started_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed    BOOLEAN DEFAULT FALSE,
+      created_at   TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE(user_id, started_at)
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS meal_prep_checks (
+      id              SERIAL PRIMARY KEY,
+      user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      check_date      DATE NOT NULL DEFAULT CURRENT_DATE,
+      eggs            BOOLEAN DEFAULT FALSE,
+      protein_shake   BOOLEAN DEFAULT FALSE,
+      veggies         BOOLEAN DEFAULT FALSE,
+      extra_protein   BOOLEAN DEFAULT FALSE,
+      protein_type    VARCHAR(60),
+      created_at      TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE(user_id, check_date)
+    )
+  `);
   // Add avatar and push token columns if missing
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS push_token TEXT`);
@@ -748,6 +774,112 @@ cron.schedule('*/30 * * * *', async () => {
     console.log(`Reminders processed: ${weekItems.rows.length} weekly, ${dayItems.rows.length} daily`);
   } catch (err) {
     console.error('Reminder cron error:', err.message);
+  }
+});
+
+// ── Cleanse challenge routes ────────────────────────────────────────────────
+app.get('/api/cleanse', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM cleanse_challenges WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
+      [req.user.id]
+    );
+    res.json({ challenge: result.rows[0] || null });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/cleanse', requireAuth, async (req, res) => {
+  const { total_days } = req.body;
+  const days = parseInt(total_days) || 14;
+  try {
+    // Mark any active challenge as completed first
+    await pool.query(
+      'UPDATE cleanse_challenges SET completed = TRUE WHERE user_id = $1 AND completed = FALSE',
+      [req.user.id]
+    );
+    const result = await pool.query(
+      'INSERT INTO cleanse_challenges (user_id, total_days, days_left) VALUES ($1, $2, $2) RETURNING *',
+      [req.user.id, days]
+    );
+    res.json({ challenge: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.patch('/api/cleanse/:id/checkin', requireAuth, async (req, res) => {
+  try {
+    const existing = await pool.query(
+      'SELECT * FROM cleanse_challenges WHERE id = $1 AND user_id = $2 AND completed = FALSE',
+      [req.params.id, req.user.id]
+    );
+    if (!existing.rows[0]) return res.status(404).json({ error: 'No active challenge found.' });
+    const challenge = existing.rows[0];
+    const newDays = Math.max(0, challenge.days_left - 1);
+    const done = newDays === 0;
+    const result = await pool.query(
+      'UPDATE cleanse_challenges SET days_left = $1, completed = $2 WHERE id = $3 RETURNING *',
+      [newDays, done, challenge.id]
+    );
+    res.json({ challenge: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.delete('/api/cleanse/:id', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'DELETE FROM cleanse_challenges WHERE id = $1 AND user_id = $2 RETURNING id',
+      [req.params.id, req.user.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Not found.' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Meal prep checklist routes ──────────────────────────────────────────────
+app.get('/api/meal-prep', requireAuth, async (req, res) => {
+  const { date } = req.query;
+  const d = date || new Date().toISOString().split('T')[0];
+  try {
+    const result = await pool.query(
+      'SELECT * FROM meal_prep_checks WHERE user_id = $1 AND check_date = $2',
+      [req.user.id, d]
+    );
+    res.json({ check: result.rows[0] || null });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.put('/api/meal-prep', requireAuth, async (req, res) => {
+  const { date, eggs, protein_shake, veggies, extra_protein, protein_type } = req.body;
+  const d = date || new Date().toISOString().split('T')[0];
+  try {
+    const result = await pool.query(
+      `INSERT INTO meal_prep_checks (user_id, check_date, eggs, protein_shake, veggies, extra_protein, protein_type)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT (user_id, check_date) DO UPDATE SET
+         eggs = EXCLUDED.eggs, protein_shake = EXCLUDED.protein_shake,
+         veggies = EXCLUDED.veggies, extra_protein = EXCLUDED.extra_protein,
+         protein_type = EXCLUDED.protein_type
+       RETURNING *`,
+      [req.user.id, d, eggs || false, protein_shake || false, veggies || false, extra_protein || false, protein_type || null]
+    );
+    res.json({ check: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 

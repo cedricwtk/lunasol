@@ -135,7 +135,7 @@ export default function Stats() {
               const cal = parseInt(l.total_calories || 0);
               const maxCal = Math.max(...last7.map(x => parseInt(x.total_calories || 0)), 1);
               const pct = Math.max((cal / maxCal) * 100, 4);
-              const day = new Date(l.log_date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'narrow' });
+              const day = new Date(l.log_date.split('T')[0] + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'narrow' });
               return (
                 <View key={i} style={styles.barCol}>
                   <View style={styles.barTrack}>

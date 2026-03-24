@@ -5,6 +5,7 @@ import { colors } from '../../lib/theme';
 export default function TabLayout() {
   return (
     <Tabs
+      tabBar={undefined}
       screenOptions={{
         headerStyle: { backgroundColor: colors.bg, elevation: 0, shadowOpacity: 0, borderBottomWidth: 1, borderBottomColor: colors.border },
         headerTintColor: colors.text,
@@ -13,9 +14,8 @@ export default function TabLayout() {
           backgroundColor: colors.tabBar,
           borderTopColor: colors.border,
           borderTopWidth: 1,
-          height: 60,
-          paddingBottom: 8,
           paddingTop: 4,
+          paddingBottom: 4,
           elevation: 8,
           shadowColor: '#000',
           shadowOffset: { width: 0, height: -2 },
@@ -25,6 +25,9 @@ export default function TabLayout() {
         tabBarActiveTintColor: colors.accent,
         tabBarInactiveTintColor: colors.muted,
         tabBarLabelStyle: { fontSize: 10, fontWeight: '600' },
+        animation: 'shift',
+        gestureEnabled: true,
+        gestureDirection: 'horizontal',
       }}
     >
       <Tabs.Screen
@@ -39,6 +42,13 @@ export default function TabLayout() {
         options={{
           title: 'Tasks',
           tabBarIcon: ({ color, size }) => <Ionicons name="clipboard-outline" size={size} color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="cleanse"
+        options={{
+          title: 'Cleanse',
+          tabBarIcon: ({ color, size }) => <Ionicons name="leaf-outline" size={size} color={color} />,
         }}
       />
       <Tabs.Screen

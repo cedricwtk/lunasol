@@ -32,6 +32,21 @@ export function AuthProvider({ children }) {
       const tokenData = await Notifications.getExpoPushTokenAsync({ projectId: undefined });
       const pushToken = tokenData.data;
       await api('/api/push-token', { method: 'PUT', body: JSON.stringify({ token: pushToken }) });
+
+      // Schedule daily reminders (cancel old ones first)
+      await Notifications.cancelAllScheduledNotificationsAsync();
+
+      // Reminder to log food - 12:00 PM daily
+      await Notifications.scheduleNotificationAsync({
+        content: { title: 'Log Your Meals', body: "Don't forget to log your food intake today!", sound: 'default' },
+        trigger: { type: 'daily', hour: 12, minute: 0 },
+      });
+
+      // Reminder to check in cleanse - 9:00 PM daily
+      await Notifications.scheduleNotificationAsync({
+        content: { title: 'Cleanse Check-in', body: 'Have you checked in for your cleanse today?', sound: 'default' },
+        trigger: { type: 'daily', hour: 21, minute: 0 },
+      });
     } catch (err) { console.log('Push token registration skipped:', err.message); }
   }
 

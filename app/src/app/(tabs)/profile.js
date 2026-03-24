@@ -4,6 +4,7 @@ import {
   Image, Modal,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '../../context/AuthContext';
 import { api, BASE_URL } from '../../lib/api';
@@ -122,14 +123,19 @@ export default function Profile() {
 
       {/* Calculator Modal */}
       <Modal visible={showCalc} animationType="slide" presentationStyle="pageSheet">
-        <View style={styles.modalHeader}>
-          <TouchableOpacity onPress={() => { setShowCalc(false); refreshProfile(); }}>
-            <Ionicons name="close" size={24} color={colors.text} />
+        <SafeAreaView style={{ flex: 1, backgroundColor: colors.bg }} edges={['top', 'bottom']}>
+          <View style={styles.modalHeader}>
+            <TouchableOpacity onPress={() => { setShowCalc(false); refreshProfile(); }}>
+              <Ionicons name="close" size={24} color={colors.text} />
+            </TouchableOpacity>
+            <Text style={styles.modalTitle}>Calorie Calculator</Text>
+            <View style={{ width: 24 }} />
+          </View>
+          <Calculator />
+          <TouchableOpacity style={styles.closeModalBtn} onPress={() => { setShowCalc(false); refreshProfile(); }}>
+            <Text style={styles.closeModalBtnText}>Close</Text>
           </TouchableOpacity>
-          <Text style={styles.modalTitle}>Calorie Calculator</Text>
-          <View style={{ width: 24 }} />
-        </View>
-        <Calculator />
+        </SafeAreaView>
       </Modal>
     </ScrollView>
   );
@@ -225,4 +231,10 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1, borderBottomColor: colors.border,
   },
   modalTitle: { fontSize: 17, fontWeight: '700', color: colors.text },
+
+  closeModalBtn: {
+    margin: 16, padding: 14, borderRadius: 12, alignItems: 'center',
+    borderWidth: 1, borderColor: colors.border, backgroundColor: colors.card,
+  },
+  closeModalBtnText: { color: colors.textDim, fontWeight: '600', fontSize: 15 },
 });

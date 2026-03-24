@@ -4,6 +4,7 @@ import {
   ScrollView, Modal, Alert, RefreshControl,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
 import { api } from '../../lib/api';
 import { colors } from '../../lib/theme';
@@ -202,15 +203,13 @@ export default function Expenses() {
 
       {/* Add Expense Modal */}
       <Modal visible={showAdd} animationType="slide" presentationStyle="pageSheet">
-        <View style={styles.modalContainer}>
+        <SafeAreaView style={styles.modalContainer} edges={['top', 'bottom']}>
           <View style={styles.modalHeader}>
             <TouchableOpacity onPress={() => setShowAdd(false)}>
               <Ionicons name="close" size={24} color={colors.text} />
             </TouchableOpacity>
             <Text style={styles.modalTitle}>Add Expense</Text>
-            <TouchableOpacity onPress={addExpense}>
-              <Text style={styles.saveBtn}>Save</Text>
-            </TouchableOpacity>
+            <View style={{ width: 24 }} />
           </View>
 
           <ScrollView style={styles.modalBody} keyboardShouldPersistTaps="handled">
@@ -291,7 +290,17 @@ export default function Expenses() {
             <TextInput style={[styles.input, { minHeight: 60 }]} value={note} onChangeText={setNote}
               placeholder="Add a note..." placeholderTextColor={colors.muted} multiline />
           </ScrollView>
-        </View>
+
+          {/* Bottom action buttons */}
+          <View style={styles.bottomActions}>
+            <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowAdd(false)}>
+              <Text style={styles.cancelBtnText}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.saveBtnBottom} onPress={addExpense}>
+              <Text style={styles.saveBtnBottomText}>Save Expense</Text>
+            </TouchableOpacity>
+          </View>
+        </SafeAreaView>
       </Modal>
     </View>
   );
@@ -382,4 +391,19 @@ const styles = StyleSheet.create({
   newCatRow: { flexDirection: 'row', gap: 8, marginTop: 10 },
   newCatSave: { backgroundColor: colors.accent, borderRadius: 12, width: 44, justifyContent: 'center', alignItems: 'center' },
   emptyHint: { color: colors.textDim, fontSize: 12, marginTop: 8 },
+
+  bottomActions: {
+    flexDirection: 'row', gap: 10, padding: 16,
+    borderTopWidth: 1, borderTopColor: colors.border,
+  },
+  cancelBtn: {
+    flex: 1, padding: 14, borderRadius: 12, alignItems: 'center',
+    borderWidth: 1, borderColor: colors.border, backgroundColor: colors.card,
+  },
+  cancelBtnText: { color: colors.textDim, fontWeight: '600', fontSize: 15 },
+  saveBtnBottom: {
+    flex: 2, padding: 14, borderRadius: 12, alignItems: 'center',
+    backgroundColor: colors.accent,
+  },
+  saveBtnBottomText: { color: '#fff', fontWeight: '700', fontSize: 15 },
 });

@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
 import {
-  View, Text, TouchableOpacity, StyleSheet, ScrollView, Alert,
+  View, Text, TouchableOpacity, StyleSheet, ScrollView, Alert, Vibration,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { requestWidgetUpdate } from 'react-native-android-widget';
+import * as Notifications from 'expo-notifications';
 import { api } from '../../lib/api';
 import { colors } from '../../lib/theme';
 import { FastingWidget } from '../../widgets/FastingWidget';
@@ -24,16 +25,32 @@ export default function Fasting() {
   const [elapsed, setElapsed] = useState(0);
   const [showCustom, setShowCustom] = useState(false);
   const timerRef = useRef(null);
+  const notifiedRef = useRef(false);
 
   useEffect(() => { loadFasts(); return () => clearInterval(timerRef.current); }, []);
 
   useEffect(() => {
     clearInterval(timerRef.current);
     if (activeFast) {
-      const tick = () => { setElapsed(Math.floor((Date.now() - new Date(activeFast.started_at).getTime()) / 1000)); };
+      notifiedRef.current = false;
+      const targetMs = parseFloat(activeFast.target_hours) * 3600 * 1000;
+      const tick = () => {
+        const now = Date.now();
+        const elapsedMs = now - new Date(activeFast.started_at).getTime();
+        setElapsed(Math.floor(elapsedMs / 1000));
+        if (elapsedMs >= targetMs && !notifiedRef.current) {
+          notifiedRef.current = true;
+          Vibration.vibrate([0, 400, 200, 400]);
+          Notifications.scheduleNotificationAsync({
+            content: { title: 'Fast Complete!', body: `You reached your ${activeFast.target_hours}h fasting goal!`, sound: 'default' },
+            trigger: null,
+          });
+          Alert.alert('Fast Complete!', `You've reached your ${activeFast.target_hours}h fasting goal! Great discipline!`);
+        }
+      };
       tick();
       timerRef.current = setInterval(tick, 1000);
-    } else { setElapsed(0); }
+    } else { setElapsed(0); notifiedRef.current = false; }
   }, [activeFast]);
 
   async function syncWidget(fast) {
