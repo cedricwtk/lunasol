@@ -217,6 +217,42 @@ async function initDB() {
       UNIQUE(user_id, check_date)
     )
   `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS panic_events (
+      id                    SERIAL PRIMARY KEY,
+      user_id               INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      triggered_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      time_until_next_meal  INTEGER,
+      interventions_used    INTEGER DEFAULT 0,
+      outcome               VARCHAR(10) CHECK (outcome IN ('survived', 'broke')),
+      location              VARCHAR(10) CHECK (location IN ('home', 'work', 'out', 'other')),
+      feeling               VARCHAR(20) CHECK (feeling IN ('bored', 'stressed', 'tired', 'anxious', 'social_pressure', 'habit')),
+      notes                 TEXT,
+      duration_seconds      INTEGER,
+      created_at            TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_letters (
+      id         SERIAL PRIMARY KEY,
+      user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      content    TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_goals (
+      id                      SERIAL PRIMARY KEY,
+      user_id                 INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      event_date              DATE,
+      streak_start            DATE DEFAULT CURRENT_DATE,
+      current_streak_days     INTEGER DEFAULT 0,
+      total_cravings_survived INTEGER DEFAULT 0,
+      total_cravings_broken   INTEGER DEFAULT 0,
+      updated_at              TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
   // Add avatar and push token columns if missing
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT`);
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS push_token TEXT`);
@@ -878,6 +914,142 @@ app.put('/api/meal-prep', requireAuth, async (req, res) => {
       [req.user.id, d, eggs || false, protein_shake || false, veggies || false, extra_protein || false, protein_type || null]
     );
     res.json({ check: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Panic button routes ─────────────────────────────────────────────────────
+app.get('/api/panic/stats', requireAuth, async (req, res) => {
+  try {
+    const goals = await pool.query(
+      'SELECT * FROM user_goals WHERE user_id = $1', [req.user.id]
+    );
+    const letter = await pool.query(
+      'SELECT * FROM user_letters WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1', [req.user.id]
+    );
+    const recent = await pool.query(
+      'SELECT * FROM panic_events WHERE user_id = $1 ORDER BY triggered_at DESC LIMIT 20', [req.user.id]
+    );
+    // Calculate current streak: consecutive days without a 'broke' event
+    let goal = goals.rows[0] || null;
+    if (!goal) {
+      const ins = await pool.query(
+        'INSERT INTO user_goals (user_id) VALUES ($1) RETURNING *', [req.user.id]
+      );
+      goal = ins.rows[0];
+    }
+    // Resilience score: avg duration_seconds of 'broke' events before next 'survived'
+    const avgRecovery = await pool.query(
+      `SELECT AVG(duration_seconds)::int AS avg_recovery
+       FROM panic_events WHERE user_id = $1 AND outcome = 'broke' AND duration_seconds > 0`,
+      [req.user.id]
+    );
+    res.json({
+      goal,
+      letter: letter.rows[0] || null,
+      recent: recent.rows,
+      avg_recovery_seconds: avgRecovery.rows[0]?.avg_recovery || null,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/panic/event', requireAuth, async (req, res) => {
+  const { time_until_next_meal, interventions_used, outcome, location, feeling, notes, duration_seconds } = req.body;
+  if (!outcome || !['survived', 'broke'].includes(outcome))
+    return res.status(400).json({ error: 'Outcome must be survived or broke.' });
+  try {
+    const event = await pool.query(
+      `INSERT INTO panic_events (user_id, time_until_next_meal, interventions_used, outcome, location, feeling, notes, duration_seconds)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [req.user.id, time_until_next_meal || null, interventions_used || 0, outcome,
+       location || null, feeling || null, notes?.trim() || null, duration_seconds || null]
+    );
+    // Update user_goals
+    if (outcome === 'survived') {
+      await pool.query(
+        `INSERT INTO user_goals (user_id, total_cravings_survived, current_streak_days, updated_at)
+         VALUES ($1, 1, COALESCE((SELECT current_streak_days FROM user_goals WHERE user_id = $1), 0), NOW())
+         ON CONFLICT (user_id) DO UPDATE SET
+           total_cravings_survived = user_goals.total_cravings_survived + 1,
+           updated_at = NOW()`,
+        [req.user.id]
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO user_goals (user_id, total_cravings_broken, updated_at)
+         VALUES ($1, 1, NOW())
+         ON CONFLICT (user_id) DO UPDATE SET
+           total_cravings_broken = user_goals.total_cravings_broken + 1,
+           updated_at = NOW()`,
+        [req.user.id]
+      );
+    }
+    const updatedGoal = await pool.query('SELECT * FROM user_goals WHERE user_id = $1', [req.user.id]);
+    res.json({ event: event.rows[0], goal: updatedGoal.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/panic/letter', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM user_letters WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1', [req.user.id]
+    );
+    res.json({ letter: result.rows[0] || null });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.put('/api/panic/letter', requireAuth, async (req, res) => {
+  const { content } = req.body;
+  if (!content?.trim()) return res.status(400).json({ error: 'Letter content is required.' });
+  try {
+    // Upsert: update existing or create new
+    const existing = await pool.query(
+      'SELECT id FROM user_letters WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1', [req.user.id]
+    );
+    let result;
+    if (existing.rows[0]) {
+      result = await pool.query(
+        'UPDATE user_letters SET content = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
+        [content.trim(), existing.rows[0].id]
+      );
+    } else {
+      result = await pool.query(
+        'INSERT INTO user_letters (user_id, content) VALUES ($1, $2) RETURNING *',
+        [req.user.id, content.trim()]
+      );
+    }
+    res.json({ letter: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.put('/api/panic/goal', requireAuth, async (req, res) => {
+  const { event_date, streak_start } = req.body;
+  try {
+    const result = await pool.query(
+      `INSERT INTO user_goals (user_id, event_date, streak_start, updated_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (user_id) DO UPDATE SET
+         event_date = COALESCE($2, user_goals.event_date),
+         streak_start = COALESCE($3, user_goals.streak_start),
+         updated_at = NOW()
+       RETURNING *`,
+      [req.user.id, event_date || null, streak_start || null]
+    );
+    res.json({ goal: result.rows[0] });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });

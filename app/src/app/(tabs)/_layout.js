@@ -38,6 +38,13 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
+        name="panic"
+        options={{
+          title: 'Panic',
+          tabBarIcon: ({ color, size }) => <Ionicons name="alert-circle-outline" size={size} color={color} />,
+        }}
+      />
+      <Tabs.Screen
         name="responsibilities"
         options={{
           title: 'Tasks',
